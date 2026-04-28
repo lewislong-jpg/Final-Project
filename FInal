@@ -1,0 +1,319 @@
+"""
+FIN 330 Final Project — Stock Analytics & Portfolio Dashboard
+Streamlit App
+"""
+
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+from datetime import datetime, timedelta
+
+# ─────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────
+st.set_page_config(
+    page_title="FIN 330 Stock Dashboard",
+    page_icon="📈",
+    layout="wide",
+)
+
+st.title("📈 FIN 330 — Stock Analytics & Portfolio Dashboard")
+st.markdown("*Real-time financial analysis powered by Yahoo Finance*")
+st.divider()
+
+# ─────────────────────────────────────────────
+# HELPER FUNCTIONS
+# ─────────────────────────────────────────────
+
+def compute_rsi(series: pd.Series, window: int = 14) -> pd.Series:
+    """Calculate 14-day Relative Strength Index."""
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(com=window - 1, min_periods=window).mean()
+    avg_loss = loss.ewm(com=window - 1, min_periods=window).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def trend_label(price, ma20, ma50):
+    if price > ma20 > ma50:
+        return "🟢 Strong Uptrend"
+    elif price < ma20 < ma50:
+        return "🔴 Strong Downtrend"
+    else:
+        return "🟡 Mixed Trend"
+
+
+def rsi_label(rsi_val):
+    if rsi_val > 70:
+        return "🔴 Overbought — Possible Sell Signal"
+    elif rsi_val < 30:
+        return "🟢 Oversold — Possible Buy Signal"
+    else:
+        return "🟡 Neutral"
+
+
+def volatility_label(vol):
+    if vol > 0.40:
+        return "🔴 High (>40%)"
+    elif vol >= 0.25:
+        return "🟡 Medium (25–40%)"
+    else:
+        return "🟢 Low (<25%)"
+
+
+def sharpe_ratio(returns: pd.Series, risk_free: float = 0.05) -> float:
+    """Annualised Sharpe ratio (252 trading days)."""
+    excess = returns - risk_free / 252
+    if excess.std() == 0:
+        return 0.0
+    return (excess.mean() / excess.std()) * np.sqrt(252)
+
+
+# ─────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Configuration")
+
+    st.subheader("Part 1 — Individual Stock")
+    ticker_input = st.text_input("Stock Ticker", value="AAPL").upper().strip()
+
+    st.subheader("Part 2 — Portfolio")
+    st.caption("Enter 5 tickers and weights (must sum to 1.00)")
+
+    p_tickers = []
+    p_weights = []
+    defaults = [("AAPL", 0.25), ("MSFT", 0.25), ("GOOGL", 0.20), ("AMZN", 0.15), ("NVDA", 0.15)]
+    for i, (dt, dw) in enumerate(defaults):
+        cols = st.columns([2, 1])
+        t = cols[0].text_input(f"Stock {i+1}", value=dt, key=f"pt{i}").upper().strip()
+        w = cols[1].number_input(f"Wt {i+1}", value=dw, min_value=0.0, max_value=1.0,
+                                  step=0.01, key=f"pw{i}")
+        p_tickers.append(t)
+        p_weights.append(w)
+
+    benchmark_ticker = st.text_input("Benchmark ETF", value="SPY").upper().strip()
+
+    weight_sum = round(sum(p_weights), 4)
+    if weight_sum != 1.0:
+        st.warning(f"Weights sum to {weight_sum:.4f} — must equal 1.00")
+
+    run = st.button("🚀 Run Analysis", use_container_width=True, type="primary")
+
+# ─────────────────────────────────────────────
+# MAIN — run on button click
+# ─────────────────────────────────────────────
+if not run:
+    st.info("👈 Configure your tickers in the sidebar, then click **Run Analysis**.")
+    st.stop()
+
+if weight_sum != 1.0:
+    st.error("Portfolio weights must sum to exactly 1.00. Please fix them in the sidebar.")
+    st.stop()
+
+# ═══════════════════════════════════════════════════════════
+# PART 1 — INDIVIDUAL STOCK ANALYSIS
+# ═══════════════════════════════════════════════════════════
+st.header(f"Part 1: Individual Stock Analysis — {ticker_input}")
+
+end_date   = datetime.today()
+start_6mo  = end_date - timedelta(days=182)
+
+with st.spinner(f"Downloading {ticker_input} data…"):
+    raw = yf.download(ticker_input, start=start_6mo, end=end_date, auto_adjust=True, progress=False)
+
+if raw.empty:
+    st.error(f"No data found for **{ticker_input}**. Check the ticker and try again.")
+    st.stop()
+
+close = raw["Close"].squeeze()
+
+# ── Indicators ──────────────────────────────
+ma20 = close.rolling(20).mean()
+ma50 = close.rolling(50).mean()
+rsi  = compute_rsi(close)
+
+current_price = float(close.iloc[-1])
+current_ma20  = float(ma20.iloc[-1])
+current_ma50  = float(ma50.iloc[-1])
+current_rsi   = float(rsi.iloc[-1])
+
+daily_returns = close.pct_change().dropna()
+vol_20d       = float(daily_returns.rolling(20).std().iloc[-1] * np.sqrt(252))
+
+# ── Metrics row ─────────────────────────────
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Current Price", f"${current_price:,.2f}")
+c2.metric("20-Day MA",     f"${current_ma20:,.2f}")
+c3.metric("50-Day MA",     f"${current_ma50:,.2f}")
+c4.metric("RSI (14)",      f"{current_rsi:.1f}")
+
+# ── Analysis cards ──────────────────────────
+col_a, col_b, col_c = st.columns(3)
+with col_a:
+    st.markdown("#### 📊 Trend")
+    st.info(trend_label(current_price, current_ma20, current_ma50))
+with col_b:
+    st.markdown("#### ⚡ Momentum (RSI)")
+    st.info(rsi_label(current_rsi))
+with col_c:
+    st.markdown("#### 🌪️ Volatility (20d Ann.)")
+    st.info(f"{volatility_label(vol_20d)}  \n`{vol_20d:.1%}`")
+
+# ── Price + MA chart ────────────────────────
+fig1 = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                     row_heights=[0.7, 0.3],
+                     subplot_titles=["Price & Moving Averages", "RSI (14)"])
+
+fig1.add_trace(go.Scatter(x=close.index, y=close.values, name="Price",
+                           line=dict(color="#1f77b4", width=1.5)), row=1, col=1)
+fig1.add_trace(go.Scatter(x=ma20.index, y=ma20.values, name="20-Day MA",
+                           line=dict(color="#ff7f0e", dash="dash")), row=1, col=1)
+fig1.add_trace(go.Scatter(x=ma50.index, y=ma50.values, name="50-Day MA",
+                           line=dict(color="#2ca02c", dash="dot")), row=1, col=1)
+
+fig1.add_trace(go.Scatter(x=rsi.index, y=rsi.values, name="RSI",
+                           line=dict(color="purple")), row=2, col=1)
+fig1.add_hline(y=70, line_dash="dash", line_color="red",   row=2, col=1)
+fig1.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+fig1.update_layout(height=560, showlegend=True, template="plotly_white",
+                   title=f"{ticker_input} — 6-Month Price Analysis")
+st.plotly_chart(fig1, use_container_width=True)
+
+# ── Trading recommendation ───────────────────
+st.subheader("💡 Trading Recommendation")
+buy_signals  = (current_rsi < 30) + ("Uptrend" in trend_label(current_price, current_ma20, current_ma50))
+sell_signals = (current_rsi > 70) + ("Downtrend" in trend_label(current_price, current_ma20, current_ma50))
+
+if buy_signals > sell_signals:
+    rec = "✅ **BUY**"
+    explanation = (f"Price is in an uptrend and RSI suggests the stock is not overbought. "
+                   f"Volatility is {vol_20d:.1%}, which is {'manageable' if vol_20d < 0.40 else 'elevated — manage position size'}.")
+elif sell_signals > buy_signals:
+    rec = "🚨 **SELL**"
+    explanation = (f"Price is in a downtrend and/or RSI is overbought ({current_rsi:.1f}). "
+                   f"Consider reducing exposure. Annualised volatility: {vol_20d:.1%}.")
+else:
+    rec = "⏸️ **HOLD**"
+    explanation = (f"Mixed signals — trend and momentum do not align strongly. "
+                   f"Wait for a clearer directional move. Volatility: {vol_20d:.1%}.")
+
+st.markdown(f"### Recommendation: {rec}")
+st.markdown(explanation)
+
+st.divider()
+
+# ═══════════════════════════════════════════════════════════
+# PART 2 — PORTFOLIO PERFORMANCE DASHBOARD
+# ═══════════════════════════════════════════════════════════
+st.header("Part 2: Portfolio Performance Dashboard")
+
+start_1yr = end_date - timedelta(days=365)
+all_tickers = list(set(p_tickers + [benchmark_ticker]))
+
+with st.spinner("Downloading 1-year portfolio & benchmark data…"):
+    port_raw = yf.download(all_tickers, start=start_1yr, end=end_date,
+                           auto_adjust=True, progress=False)["Close"]
+
+# Handle single-ticker edge case
+if isinstance(port_raw, pd.Series):
+    port_raw = port_raw.to_frame()
+
+missing = [t for t in all_tickers if t not in port_raw.columns]
+if missing:
+    st.error(f"Could not download data for: {', '.join(missing)}. Check tickers.")
+    st.stop()
+
+port_raw.dropna(inplace=True)
+
+# ── Return calculations ──────────────────────
+port_returns = port_raw[p_tickers].pct_change().dropna()
+bm_returns   = port_raw[benchmark_ticker].pct_change().dropna()
+
+weights_arr  = np.array(p_weights)
+portfolio_daily_ret = port_returns.dot(weights_arr)
+
+# ── Cumulative return curves ─────────────────
+cum_portfolio = (1 + portfolio_daily_ret).cumprod() - 1
+cum_benchmark = (1 + bm_returns).cumprod() - 1
+
+# ── Performance metrics ──────────────────────
+total_ret     = float(cum_portfolio.iloc[-1])
+bm_total_ret  = float(cum_benchmark.iloc[-1])
+outperform    = total_ret - bm_total_ret
+port_vol      = float(portfolio_daily_ret.std() * np.sqrt(252))
+bm_vol        = float(bm_returns.std() * np.sqrt(252))
+port_sharpe   = sharpe_ratio(portfolio_daily_ret)
+bm_sharpe     = sharpe_ratio(bm_returns)
+
+# ── Metric cards ─────────────────────────────
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Portfolio Return",   f"{total_ret:.2%}", delta=f"{outperform:+.2%} vs benchmark")
+m2.metric("Benchmark Return",   f"{bm_total_ret:.2%}")
+m3.metric("Portfolio Volatility", f"{port_vol:.2%}", delta=f"Benchmark {bm_vol:.2%}", delta_color="inverse")
+m4.metric("Sharpe Ratio",       f"{port_sharpe:.2f}", delta=f"Benchmark {bm_sharpe:.2f}")
+
+# ── Cumulative return chart ──────────────────
+fig2 = go.Figure()
+fig2.add_trace(go.Scatter(x=cum_portfolio.index, y=cum_portfolio.values * 100,
+                           name="Portfolio", line=dict(color="#1f77b4", width=2)))
+fig2.add_trace(go.Scatter(x=cum_benchmark.index, y=cum_benchmark.values * 100,
+                           name=benchmark_ticker, line=dict(color="#ff7f0e", width=2, dash="dash")))
+fig2.add_hline(y=0, line_dash="dot", line_color="gray")
+fig2.update_layout(title="Cumulative Returns — Portfolio vs Benchmark (1 Year)",
+                   yaxis_title="Cumulative Return (%)",
+                   template="plotly_white", height=420)
+st.plotly_chart(fig2, use_container_width=True)
+
+# ── Portfolio weights pie ────────────────────
+col_pie, col_tbl = st.columns([1, 1])
+with col_pie:
+    fig3 = px.pie(names=p_tickers, values=p_weights, title="Portfolio Allocation",
+                  hole=0.35, color_discrete_sequence=px.colors.qualitative.Set2)
+    st.plotly_chart(fig3, use_container_width=True)
+
+# ── Per-stock return table ───────────────────
+with col_tbl:
+    st.markdown("#### Individual Stock Returns")
+    stock_total_ret = ((port_raw[p_tickers].iloc[-1] / port_raw[p_tickers].iloc[0]) - 1)
+    tbl_df = pd.DataFrame({
+        "Ticker": p_tickers,
+        "Weight": [f"{w:.0%}" for w in p_weights],
+        "1-Year Return": [f"{r:.2%}" for r in stock_total_ret.values],
+    })
+    st.dataframe(tbl_df, use_container_width=True, hide_index=True)
+
+# ── Interpretation ──────────────────────────
+st.subheader("📝 Portfolio Interpretation")
+
+col_i1, col_i2, col_i3 = st.columns(3)
+with col_i1:
+    st.markdown("**Outperformance**")
+    if outperform > 0:
+        st.success(f"Portfolio **outperformed** the benchmark by **{outperform:.2%}**.")
+    else:
+        st.error(f"Portfolio **underperformed** the benchmark by **{abs(outperform):.2%}**.")
+
+with col_i2:
+    st.markdown("**Risk**")
+    if port_vol > bm_vol:
+        st.warning(f"Portfolio was **more volatile** ({port_vol:.2%}) than the benchmark ({bm_vol:.2%}).")
+    else:
+        st.success(f"Portfolio was **less volatile** ({port_vol:.2%}) than the benchmark ({bm_vol:.2%}).")
+
+with col_i3:
+    st.markdown("**Efficiency (Sharpe)**")
+    if port_sharpe > bm_sharpe:
+        st.success(f"Sharpe of **{port_sharpe:.2f}** beats benchmark ({bm_sharpe:.2f}). Portfolio is **risk-efficient**.")
+    else:
+        st.warning(f"Sharpe of **{port_sharpe:.2f}** lags benchmark ({bm_sharpe:.2f}). Lower risk-adjusted return.")
+
+st.divider()
+st.caption("Data sourced from Yahoo Finance via yfinance · FIN 330 Final Project")
