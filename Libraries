@@ -1,2 +1,6 @@
-import pandas as pd
-import numpy as np
+streamlit
+pandas
+numpy
+yfinance
+plotly
+scikit-learn
